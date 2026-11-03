@@ -67,6 +67,7 @@ If you encounter a bug, please open a GitHub issue and include:
 - Fabric Loader version
 - Fabric API version
 - Relevant server log output
+
 I will help you out :)
 
 ## Version
