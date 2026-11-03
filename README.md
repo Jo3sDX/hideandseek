@@ -25,7 +25,7 @@ A server-side Fabric mod that adds a multiplayer Hide and Seek minigame to Minec
 
 1. Install Fabric Loader on your Minecraft server.
 2. Install Fabric API.
-3. Download the mod `.jar` file.
+3. Download the mod `.jar` file from the latest release.
 4. Place the `.jar` inside your server's `mods` folder.
 5. Start the server.
 
