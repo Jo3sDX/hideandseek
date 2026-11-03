@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "hideandseek",
+  "version": "${version}",
+  "name": "Hide and Seek",
+  "description": "Server-side Hide and Seek with Normal (prison) and Sabotage (conversion) modes.",
+  "authors": ["Hide and Seek"],
+  "license": "MIT",
+  "environment": "server",
+  "entrypoints": {
+    "main": ["com.hideandseek.HideAndSeekMod"]
+  },
+  "depends": {
+    "fabricloader": ">=0.19.5",
+    "minecraft": "~26.3",
+    "java": ">=25",
+    "fabric-api": "*"
+  }
+}
