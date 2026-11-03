@@ -68,7 +68,6 @@ public final class GameManager {
 	private int emptyTeamSeconds = 0;
 	/** Result message and destinations retained during the fixed post-game delay. */
 	private String endingMessage;
-	private final Set<UUID> endingToWorldSpawn = new HashSet<>();
 
 	/** Everyone who takes part in the current round. Sabotage: online players only. */
 	private final Map<UUID, Role> roles = new LinkedHashMap<>();
@@ -85,7 +84,6 @@ public final class GameManager {
 	private final Set<UUID> pendingHiders = new LinkedHashSet<>();
 	/** Players who were dead when a game ended; moved when they respawn. */
 	private final Set<UUID> respawnToSpawn = new HashSet<>();
-	private final Set<UUID> respawnToLobby = new HashSet<>();
 	private final List<Task> tasks = new ArrayList<>();
 
 	public GameManager(MinecraftServer server, GameConfig config) {
@@ -103,7 +101,7 @@ public final class GameManager {
 
 	public void shutdown() {
 		if (state != GameState.IDLE) {
-			stopInternal(null, false, Collections.emptySet());
+			stopInternal(null);
 		}
 	}
 
@@ -238,11 +236,9 @@ public final class GameManager {
 		equipped.clear();
 		arrowGlowExpiry.clear();
 		respawnToSpawn.clear();
-		respawnToLobby.clear();
 		emptyTeamSeconds = 0;
 		timerEndTick = -1;
 		endingMessage = null;
-		endingToWorldSpawn.clear();
 	}
 
 	/**
@@ -335,17 +331,20 @@ public final class GameManager {
 				"gamerule " + name + " " + value);
 	}
 
-	/** Temporarily: keep_inventory on (no drops, no loss) and locator_bar off. Originals are saved and restored. */
+	/**
+	 * At game start: pvp=true (always) and, temporarily, keep_inventory on (no drops, no loss) and locator_bar off.
+	 * The original keep_inventory/locator_bar values are saved and restored; pvp is switched off again when the game ends.
+	 */
 	private void applyServerSettings() {
-		if (!config.savedGameRules.isEmpty()) {
-			return;
+		if (config.savedGameRules.isEmpty()) {
+			ServerLevel overworld = server.overworld();
+			config.savedGameRules.put("keep_inventory", String.valueOf(overworld.getGameRules().get(GameRules.KEEP_INVENTORY)));
+			config.savedGameRules.put("locator_bar", String.valueOf(overworld.getGameRules().get(GameRules.LOCATOR_BAR)));
+			config.save();
+			setRule("keep_inventory", "true");
+			setRule("locator_bar", "false");
 		}
-		ServerLevel overworld = server.overworld();
-		config.savedGameRules.put("keep_inventory", String.valueOf(overworld.getGameRules().get(GameRules.KEEP_INVENTORY)));
-		config.savedGameRules.put("locator_bar", String.valueOf(overworld.getGameRules().get(GameRules.LOCATOR_BAR)));
-		config.save();
-		setRule("keep_inventory", "true");
-		setRule("locator_bar", "false");
+		setRule("pvp", "true");
 	}
 
 	private void restoreServerSettings() {
@@ -357,6 +356,7 @@ public final class GameManager {
 		}
 		config.savedGameRules.clear();
 		config.save();
+		setRule("pvp", "false"); // a leftover game (e.g. a crash) must not leave pvp enabled
 	}
 
 	// ------------------------------------------------------------------ starting games
@@ -386,13 +386,24 @@ public final class GameManager {
 			throw new GameException("At least 2 online players are required (1 seeker + 1 hider).");
 		}
 		Set<UUID> seekers = selectSeekers(players, requested);
-		applyServerSettings();
+		applyServerSettings(); // includes pvp=true
+		// Every participant (and nobody else) is teleported to the lobby BEFORE roles/preparation begin, so the frozen
+		// seeker positions are the lobby positions.
+		boolean teleportedToLobby = config.lobby != null;
+		if (teleportedToLobby) {
+			for (ServerPlayer p : players) {
+				teleportedToLobby &= Locations.teleport(server, p, config.lobby);
+			}
+		}
 		beginRound(newMode, players, seekers);
 		if (config.prepTimeSeconds <= 0) {
 			releaseSeekers(); // preparation time 0: no waiting, seekers are released right away
 		}
 		return newMode + " Mode started: " + seekers.size() + " seeker(s), " + (players.size() - seekers.size())
-				+ " hider(s). " + prepDescription();
+				+ " hider(s). " + prepDescription()
+				+ (teleportedToLobby ? ""
+						: " WARNING: the lobby is not set (or its dimension is unavailable), so players were not "
+								+ "teleported. Use /hideandseek setlobby.");
 	}
 
 	/**
@@ -557,20 +568,23 @@ public final class GameManager {
 			restoreServerSettings();
 			return "No game was running (pending selections cleared, leftover teams and game rules restored).";
 		}
-		boolean hadPrisoners = !jailed.isEmpty();
-		stopInternal("The game was stopped by an admin.", true, new HashSet<>(jailed));
-		String extra = hadPrisoners ? " Prisoners were sent to the world spawn." : "";
-		return "Game stopped. Scheduled tasks cancelled; players, game modes and game rules restored." + extra;
+		stopInternal("The game was stopped by an admin.");
+		return "Game stopped. PvP disabled, scheduled tasks cancelled, all participants teleported to the world spawn; "
+				+ "game modes and game rules restored.";
 	}
 
 	/**
-	 * Restores everything and returns to IDLE. Players in {@code toWorldSpawn} go to the world spawn; other
-	 * participants go to the lobby if {@code toLobby} and a lobby is set. Dead players are moved when they respawn.
+	 * Restores everything and returns to IDLE: pvp off, every participant (including prisoners) to the Overworld world
+	 * spawn, original game modes, equipment, teams, rules. Dead participants are moved when they respawn. Only
+	 * participants are teleported; unrelated players are never touched.
 	 */
-	private void stopInternal(String reason, boolean toLobby, Set<UUID> toWorldSpawn) {
+	private void stopInternal(String reason) {
 		boolean wasRunning = state != GameState.IDLE;
 		generation++; // cancels every scheduled task: nothing can restart or finish later
 		tasks.clear();
+		if (wasRunning) {
+			setRule("pvp", "false");
+		}
 		for (ServerPlayer p : onlinePlayers()) {
 			UUID id = p.getUUID();
 			boolean participant = roles.containsKey(id);
@@ -585,21 +599,10 @@ public final class GameManager {
 			if (!participant || !wasRunning) {
 				continue;
 			}
-			boolean spawn = toWorldSpawn.contains(id);
-			boolean lobby = !spawn && toLobby && config.lobby != null;
-			if (!spawn && !lobby) {
-				continue;
-			}
 			if (p.isAlive()) {
-				if (spawn) {
-					Locations.teleportToWorldSpawn(server, p);
-				} else {
-					Locations.teleport(server, p, config.lobby);
-				}
-			} else if (spawn) {
-				respawnToSpawn.add(id);
+				Locations.teleportToWorldSpawn(server, p);
 			} else {
-				respawnToLobby.add(id);
+				respawnToSpawn.add(id); // still on the death screen: moved the moment they respawn
 			}
 		}
 		config.save();
@@ -612,7 +615,6 @@ public final class GameManager {
 		emptyTeamSeconds = 0;
 		timerEndTick = -1;
 		endingMessage = null;
-		endingToWorldSpawn.clear();
 		restoreServerSettings();
 		state = GameState.IDLE;
 		mode = null;
@@ -633,34 +635,13 @@ public final class GameManager {
 		evaluateNormal(false);
 	}
 
-	private void enforcePrison() {
-		if (jailed.isEmpty() || config.prison == null) {
-			return;
-		}
-		ServerLevel prisonLevel = Locations.level(server, config.prison);
-		if (prisonLevel == null) {
-			return;
-		}
-		double maxSq = (double) config.prisonRadius * config.prisonRadius;
-		for (UUID id : jailed) {
-			ServerPlayer p = player(id);
-			if (p == null || !p.isAlive()) {
-				continue;
-			}
-			boolean wrongDimension = !p.level().dimension().equals(prisonLevel.dimension());
-			if (wrongDimension || p.distanceToSqr(config.prison.x, config.prison.y, config.prison.z) > maxSq) {
-				Locations.teleport(server, p, config.prison);
-			}
-		}
-	}
-
 	// ------------------------------------------------------------------ win conditions & timer
 
 	private void reevaluate() {
 		if (state == GameState.ACTIVE_NORMAL) {
 			evaluateNormal(false);
 		} else if (state == GameState.ACTIVE_SABOTAGE) {
-			evaluateSabotage();
+			evaluateSabotage(false);
 		}
 	}
 
@@ -722,17 +703,16 @@ public final class GameManager {
 		}
 		finishAfterDelay(winner == Role.SEEKER
 				? "Round over. Seekers won. Use /hideandseek start to play again."
-				: "Round over. Hiders won. Use /hideandseek start to play again.", new HashSet<>(jailed));
+				: "Round over. Hiders won. Use /hideandseek start to play again.");
 	}
 
 	/**
 	 * The single end-of-game path for BOTH modes and BOTH end reasons: wait exactly 5 seconds (fixed, independent of
 	 * the preparation time) and then run the cleanup. It only ever leads to IDLE: it can never start a round.
 	 */
-	private void finishAfterDelay(String message, Set<UUID> toWorldSpawn) {
+	private void finishAfterDelay(String message) {
 		endingMessage = message;
-		endingToWorldSpawn.clear();
-		endingToWorldSpawn.addAll(toWorldSpawn);
+		setRule("pvp", "false"); // PvP ends with the game, not 5 seconds later
 		schedule(POST_GAME_DELAY_TICKS, this::completeGame);
 	}
 
@@ -743,7 +723,7 @@ public final class GameManager {
 		state = GameState.ROUND_ENDING;
 		timerEndTick = -1;
 		broadcast(message);
-		finishAfterDelay(message + " Use /hideandseek start to play again.", new HashSet<>(jailed));
+		finishAfterDelay(message + " Use /hideandseek start to play again.");
 	}
 
 	private void completeGame() {
@@ -752,9 +732,8 @@ public final class GameManager {
 		}
 		String message = endingMessage != null ? endingMessage
 				: "Game over. Use /hideandseek start to play again.";
-		Set<UUID> toWorldSpawn = new HashSet<>(endingToWorldSpawn);
-		// Prisoners (Normal Mode) go to world spawn; others go to the lobby (if set).
-		stopInternal(message, true, toWorldSpawn);
+		// Every participant (prisoners included) is teleported to the world spawn by the cleanup.
+		stopInternal(message);
 	}
 
 	/** Game timer expiry. Normal: hiders win. Sabotage: the surviving hiders win and the game ends. */
@@ -767,33 +746,62 @@ public final class GameManager {
 		}
 	}
 
-	private void evaluateSabotage() {
+	/**
+	 * Sabotage win/maintenance check. Roles are keyed by UUID and are NEVER removed because a player is offline, so a
+	 * reconnecting player gets their role (and team, equipment record, prison state) back. Offline hiders still count
+	 * as hiders; if a whole team is offline the round waits, and after 5 minutes it ends with no winner.
+	 */
+	private void evaluateSabotage(boolean fromTick) {
 		if (state != GameState.ACTIVE_SABOTAGE) {
 			return;
 		}
-		roles.keySet().removeIf(id -> player(id) == null);
 		if (roles.size() < 2) {
-			endWithoutWinner("Sabotage ended: fewer than 2 players remain.");
+			endWithoutWinner("Sabotage ended: fewer than 2 players are in the game.");
 			return;
 		}
-		if (count(Role.SEEKER) == 0) {
-			List<ServerPlayer> hiders = new ArrayList<>();
+		if (count(Role.SEEKER) == 0) { // only reachable if every seeker was removed by an admin action
+			List<ServerPlayer> candidates = new ArrayList<>();
 			for (UUID id : roles.keySet()) {
 				ServerPlayer p = player(id);
 				if (p != null) {
-					hiders.add(p);
+					candidates.add(p);
 				}
 			}
-			ServerPlayer chosen = hiders.get(random.nextInt(hiders.size()));
-			assign(chosen, Role.SEEKER);
-			syncEquipment(chosen);
-			removeGlow(chosen);
-			broadcast("A new seeker has been selected: " + nameOf(chosen) + "!");
-			Notifier.title(chosen, text("You are a SEEKER!", ChatFormatting.RED, ChatFormatting.BOLD),
-					text("The previous seeker left", ChatFormatting.RED));
+			if (!candidates.isEmpty()) {
+				ServerPlayer chosen = candidates.get(random.nextInt(candidates.size()));
+				assign(chosen, Role.SEEKER);
+				syncEquipment(chosen);
+				removeGlow(chosen);
+				broadcast("A new seeker has been selected: " + nameOf(chosen) + "!");
+				Notifier.title(chosen, text("You are a SEEKER!", ChatFormatting.RED, ChatFormatting.BOLD),
+						text("No seeker was left", ChatFormatting.RED));
+			}
+		}
+		int seekersOnline = 0;
+		int hidersOnline = 0;
+		for (Map.Entry<UUID, Role> e : roles.entrySet()) {
+			if (player(e.getKey()) == null) {
+				continue;
+			}
+			if (e.getValue() == Role.SEEKER) {
+				seekersOnline++;
+			} else {
+				hidersOnline++;
+			}
 		}
 		if (count(Role.HIDER) == 0) {
 			endSabotageRound(false);
+			return;
+		}
+		if (seekersOnline == 0 || hidersOnline == 0) {
+			if (fromTick) {
+				emptyTeamSeconds++;
+				if (emptyTeamSeconds >= EMPTY_TEAM_TIMEOUT_SECONDS) {
+					endWithoutWinner("The game ended with no winner: a whole team stayed offline for 5 minutes.");
+				}
+			}
+		} else {
+			emptyTeamSeconds = 0;
 		}
 	}
 
@@ -815,8 +823,7 @@ public final class GameManager {
 		}
 		finishAfterDelay(timeout
 				? "Sabotage game over: the surviving hiders won. Use /hideandseek start to play again."
-				: "Sabotage game over: all players were converted. Use /hideandseek start to play again.",
-				Collections.emptySet());
+				: "Sabotage game over: all players were converted. Use /hideandseek start to play again.");
 	}
 
 	private void convertInSabotage(ServerPlayer victim, ServerPlayer killer) {
@@ -835,7 +842,7 @@ public final class GameManager {
 		broadcast(nameOf(victim) + " was caught"
 				+ (killer != null ? " by " + nameOf(killer) : "") + " and is now a seeker! Hiders left: "
 				+ count(Role.HIDER));
-		evaluateSabotage();
+		evaluateSabotage(false);
 	}
 
 	// ------------------------------------------------------------------ admin role commands
@@ -1095,29 +1102,31 @@ public final class GameManager {
 		}
 	}
 
-	/** AFTER_RESPAWN: the new player entity is re-configured (Adventure mode, prison, frozen position). */
+	/**
+	 * AFTER_RESPAWN (fires once the new player entity exists). Roles are never touched here.
+	 * - Dead when the game ended: moved to the world spawn.
+	 * - Caught Normal-Mode hider: sent to the prison (existing behaviour; they may walk out, nothing confines them).
+	 * - Everyone else while a game is running: sent to the lobby.
+	 */
 	public void onRespawn(ServerPlayer player) {
 		UUID id = player.getUUID();
 		if (respawnToSpawn.remove(id)) {
 			Locations.teleportToWorldSpawn(server, player);
 			return;
 		}
-		if (respawnToLobby.remove(id)) {
-			if (config.lobby != null) {
-				Locations.teleport(server, player, config.lobby);
-			}
-			return;
-		}
 		if (state == GameState.IDLE || !roles.containsKey(id)) {
-			return;
+			return; // normal vanilla respawn outside of a game
 		}
 		enterAdventure(player);
 		if (jailed.contains(id) && config.prison != null) {
 			Locations.teleport(server, player, config.prison);
 			Notifier.title(player, text("You have been caught!", ChatFormatting.RED, ChatFormatting.BOLD),
 					text("You are in prison until the round ends", ChatFormatting.GRAY));
-		} else if (frozen.containsKey(id)) {
-			frozen.put(id, new double[] {player.getX(), player.getZ()});
+		} else if (canEditRoles() && config.lobby != null) {
+			Locations.teleport(server, player, config.lobby);
+		}
+		if (frozen.containsKey(id)) {
+			frozen.put(id, new double[] {player.getX(), player.getZ()}); // after any teleport
 		}
 	}
 
@@ -1142,9 +1151,7 @@ public final class GameManager {
 		TeamManager.assign(server, player, role);
 		syncEquipment(player);
 		enterAdventure(player); // original mode stays stored from the first time
-		if (jailed.contains(id)) {
-			Locations.teleport(server, player, config.prison);
-		} else if (role == Role.SEEKER && state == GameState.PREPARING) {
+		if (role == Role.SEEKER && state == GameState.PREPARING) {
 			frozen.put(id, new double[] {player.getX(), player.getZ()});
 		}
 		schedule(20, () -> {
@@ -1165,14 +1172,8 @@ public final class GameManager {
 			pendingHiders.remove(id);
 			return;
 		}
-		if (mode == Mode.SABOTAGE) {
-			roles.remove(id);
-			frozen.remove(id);
-			equipped.remove(id);
-			arrowGlowExpiry.remove(id);
-			TeamManager.remove(server, player);
-		}
-		// Normal Mode keeps the role and prison status so a reconnecting player continues where they left off.
+		// BOTH modes keep everything keyed by UUID: role, team membership, equipment record, prison status and the
+		// stored original game mode. Nothing is removed on disconnect, so a reconnect restores the same role.
 		schedule(1, this::reevaluate);
 	}
 
@@ -1184,12 +1185,8 @@ public final class GameManager {
 		}
 		config.save();
 		player.setGameMode(parseGameType(saved));
-		if (config.lobby != null) {
-			Locations.teleport(server, player, config.lobby);
-		} else {
-			Locations.teleportToWorldSpawn(server, player);
-		}
-		tell(player, "The game ended while you were offline; you were returned to normal.");
+		Locations.teleportToWorldSpawn(server, player);
+		tell(player, "The game ended while you were offline; you were returned to the world spawn.");
 	}
 
 	public void tick() {
@@ -1203,7 +1200,6 @@ public final class GameManager {
 		}
 		expireArrowGlow();
 		if (tick % 10 == 0) {
-			enforcePrison();
 			keepFed();
 		}
 		if (isActive()) {
@@ -1212,6 +1208,7 @@ public final class GameManager {
 			}
 			if (tick % 20 == 0) {
 				evaluateNormal(true);
+				evaluateSabotage(true);
 				sendActionBars();
 			}
 		}

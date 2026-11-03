@@ -9,5 +9,5 @@ call .bootstrap\gradle-%GV%\bin\gradle.bat wrapper --gradle-version %GV%
 :build
 call gradlew.bat build
 echo.
-echo If the build succeeded, your mod is: build\libs\hideandseek-1.0.0.jar
+echo If the build succeeded, your mod is: build\libs\hideandseek-1.1.0.jar
 pause

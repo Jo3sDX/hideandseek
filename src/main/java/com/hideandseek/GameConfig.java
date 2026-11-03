@@ -55,8 +55,6 @@ public final class GameConfig {
 	public int timeLimitMinutes = 0;
 	/** Seconds the seekers stay frozen at the start of a game (0 = released immediately). */
 	public int prepTimeSeconds = 60;
-	/** Prisoners further than this many blocks from the prison spawn are pulled back. */
-	public int prisonRadius = 8;
 	/**
 	 * Players whose game mode was changed to ADVENTURE for prison (UUID -> ORIGINAL game mode of every participant).
 	 * Persisted so that nobody stays stuck in adventure mode after a crash or restart.
@@ -97,9 +95,6 @@ public final class GameConfig {
 		}
 		if (cfg.prepTimeSeconds < 0) {
 			cfg.prepTimeSeconds = 60;
-		}
-		if (cfg.prisonRadius < 2) {
-			cfg.prisonRadius = 8;
 		}
 		cfg.save();
 		return cfg;

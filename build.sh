@@ -12,4 +12,4 @@ if [ ! -f gradle/wrapper/gradle-wrapper.jar ] || [ ! -f gradlew ]; then
 fi
 chmod +x gradlew
 ./gradlew build
-echo "If the build succeeded, your mod is: build/libs/hideandseek-1.0.0.jar"
+echo "If the build succeeded, your mod is: build/libs/hideandseek-1.1.0.jar"
