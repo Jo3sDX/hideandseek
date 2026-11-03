@@ -37,8 +37,8 @@ All commands use the `/hideandseek` prefix.
 |---|---|
 | `/hideandseek help` | Display available commands |
 | `/hideandseek status` | Display current game status and settings |
-| `/hideandseek start normal [seekers]` | Start Normal mode |
-| `/hideandseek start sabotage [seekers]` | Start Sabotage mode |
+| `/hideandseek start normal` | Start Normal mode |
+| `/hideandseek start sabotage` | Start Sabotage mode |
 | `/hideandseek stop` | Stop the current game |
 | `/hideandseek setseekers <number>` | Set the default number of Seekers |
 | `/hideandseek seeker <player>` | Assign a player as a Seeker |
